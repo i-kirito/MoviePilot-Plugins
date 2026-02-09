@@ -1,16 +1,24 @@
-# MoviePilot 插件库
+# MoviePilot-Plugins
 
 ikirito 的 MoviePilot V2 插件仓库
 
+MoviePilot 官方插件市场：https://github.com/jxxghp/MoviePilot-Plugins
+
 ## 安装方法
 
-在 MoviePilot 的「设置」-「插件」-「安装插件」中添加本仓库地址：
+在 MoviePilot 的 设置 -> 系统 -> 插件 中添加本仓库地址：
 
 ```
 https://github.com/i-kirito/MoviePilot-Plugins
 ```
 
 ## 插件列表
+
+| 插件 | 版本 | 说明 |
+|------|------|------|
+| TransferCleaner | v1.6 | 转移记录清理 - 监控目录文件变化，自动删除对应的转移历史记录 |
+
+---
 
 ### TransferCleaner - 转移记录清理
 
@@ -40,25 +48,3 @@ https://github.com/i-kirito/MoviePilot-Plugins
 | v1.2 | 新增路径映射功能 |
 | v1.1 | 新增延迟删除、不删除目录配置 |
 | v1.0 | 初始版本 |
-
-## 目录结构
-
-```
-mp-plugin/
-├── icons/                 # 插件图标
-│   └── transfercleaner.png
-├── plugins.v2/            # V2 插件代码
-│   └── transfercleaner/
-│       └── __init__.py
-├── package.v2.json        # V2 插件仓库元数据
-├── LICENSE
-└── README.md
-```
-
-## 开发说明
-
-插件基于 MoviePilot V2 插件框架开发，需要 MoviePilot V2 版本。
-
-## License
-
-MIT
