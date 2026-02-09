@@ -47,7 +47,7 @@ class TransferCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "1.7"
+    plugin_version = "1.8"
     # 插件作者
     plugin_author = "i-kirito"
     # 作者主页
@@ -400,18 +400,28 @@ class TransferCleaner(_PluginBase):
 
     def _run_clean_failed_task(self):
         """
-        清理失败记录：源文件已不存在（说明上传成功了）但记录状态是失败的
+        清理/重试失败记录：
+        - 源文件不存在（说明已上传成功）：删除失败记录
+        - 源文件仍存在（说明确实失败了）：删除记录并重新整理
         """
-        logger.info("TransferCleaner: 开始清理假失败记录...")
+        logger.info("TransferCleaner: 开始处理失败记录...")
 
         total_checked = 0
-        total_deleted = 0
-        deleted_records = []
+        deleted_count = 0
+        retry_count = 0
 
         try:
             from sqlalchemy import desc
             from app.db.models.transferhistory import TransferHistory
             from app.db import SessionFactory
+            from app.chain.transfer import TransferChain
+
+            transfer_chain = None
+            if not self._dry_run:
+                try:
+                    transfer_chain = TransferChain()
+                except ImportError:
+                    logger.error("TransferCleaner: 无法导入 TransferChain")
 
             with SessionFactory() as db:
                 # 查询所有失败的记录
@@ -427,54 +437,65 @@ class TransferCleaner(_PluginBase):
                     # 将存储路径转换为本地路径
                     local_path = self._convert_storage_to_local(record.src)
 
-                    # 如果源文件不存在，说明其实已经成功上传了
-                    if not os.path.exists(local_path):
+                    if os.path.exists(local_path):
+                        # 源文件存在，说明确实失败了，需要重试
+                        if self._dry_run:
+                            logger.info(
+                                f"[DryRun] TransferCleaner: 将重试整理 "
+                                f"ID={record.id}, src={record.src}"
+                            )
+                            retry_count += 1
+                        else:
+                            # 删除旧记录并重新整理
+                            self._transferhistory.delete(record.id)
+                            logger.info(f"TransferCleaner: 已删除失败记录 ID={record.id}")
+
+                            if transfer_chain:
+                                try:
+                                    transfer_chain.process(Path(local_path))
+                                    retry_count += 1
+                                    logger.info(f"TransferCleaner: 已触发重新整理 {local_path}")
+                                except Exception as e:
+                                    logger.exception(f"TransferCleaner: 重新整理失败 {local_path}")
+                    else:
+                        # 源文件不存在，说明实际已上传成功，删除错误记录
                         if self._dry_run:
                             logger.info(
                                 f"[DryRun] TransferCleaner: 将删除假失败记录 "
-                                f"ID={record.id}, src={record.src}, errmsg={record.errmsg}"
+                                f"ID={record.id}, src={record.src}"
                             )
-                            total_deleted += 1
-                            deleted_records.append({
-                                "id": record.id,
-                                "src": record.src,
-                                "title": getattr(record, 'title', ''),
-                                "errmsg": record.errmsg
-                            })
+                            deleted_count += 1
                         else:
                             self._transferhistory.delete(record.id)
                             logger.info(
                                 f"TransferCleaner: 已删除假失败记录 "
                                 f"ID={record.id}, src={record.src}"
                             )
-                            total_deleted += 1
-                            deleted_records.append({
-                                "id": record.id,
-                                "src": record.src,
-                                "title": getattr(record, 'title', ''),
-                                "errmsg": record.errmsg
-                            })
+                            deleted_count += 1
 
-                    if total_deleted >= 500:
+                    if deleted_count + retry_count >= 100:
+                        logger.warning("TransferCleaner: 达到单次处理上限 100 条")
                         break
 
         except Exception as e:
-            logger.exception("TransferCleaner: 清理假失败记录异常")
+            logger.exception("TransferCleaner: 处理失败记录异常")
             return
 
-        if total_deleted > 0:
+        if deleted_count > 0 or retry_count > 0:
             dry_run_tag = "[模拟] " if self._dry_run else ""
-            summary = f"{dry_run_tag}清理假失败记录完成\n"
+            summary = f"{dry_run_tag}处理失败记录完成\n"
             summary += f"检查失败记录: {total_checked} 条\n"
-            summary += f"{'将删除' if self._dry_run else '已删除'}: {total_deleted} 条\n"
-            summary += "(源文件已不存在，说明实际已上传成功)"
+            if deleted_count > 0:
+                summary += f"{'将删除' if self._dry_run else '已删除'}假失败记录: {deleted_count} 条\n"
+            if retry_count > 0:
+                summary += f"{'将重试' if self._dry_run else '已重试'}整理: {retry_count} 条\n"
 
             logger.info(f"TransferCleaner: {summary}")
 
             if self._notify:
                 self.post_message(
                     mtype=NotificationType.SiteMessage,
-                    title=f"【转移记录清理】{dry_run_tag}假失败记录",
+                    title=f"【转移记录清理】{dry_run_tag}失败记录处理",
                     text=summary
                 )
 
