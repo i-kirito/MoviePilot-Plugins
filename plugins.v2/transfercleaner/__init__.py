@@ -76,7 +76,6 @@ class TransferCleaner(_PluginBase):
     _retransfer_dirs: str = ""
     _retransfer_cron: str = ""
     _clean_failed: bool = False
-    _clean_failed_cron: str = ""
     _observers: List[Observer] = None
     _transferhistory: Optional[TransferHistoryOper] = None
     # 事件去重缓存 {path: timestamp}
@@ -131,7 +130,6 @@ class TransferCleaner(_PluginBase):
             self._retransfer_dirs = config.get("retransfer_dirs", "")
             self._retransfer_cron = config.get("retransfer_cron", "")
             self._clean_failed = config.get("clean_failed", False)
-            self._clean_failed_cron = config.get("clean_failed_cron", "")
             # 预编译排除关键词列表
             self._exclude_keywords_list = [
                 k.strip() for k in self._exclude_keywords.split("\n") if k.strip()
@@ -216,7 +214,6 @@ class TransferCleaner(_PluginBase):
             "retransfer_dirs": self._retransfer_dirs,
             "retransfer_cron": self._retransfer_cron,
             "clean_failed": self._clean_failed,
-            "clean_failed_cron": self._clean_failed_cron,
         })
 
     def _parse_path_mappings(self) -> Dict[str, str]:
@@ -905,29 +902,27 @@ class TransferCleaner(_PluginBase):
 
         services = []
 
-        # 检测未上传文件定时任务
+        # 定时执行检测未上传和清理假失败任务
         if self._retransfer_cron:
             services.append({
-                "id": "TransferCleanerRetransfer",
-                "name": "检测未上传文件并重新整理",
+                "id": "TransferCleanerScheduled",
+                "name": "检测未上传文件/清理假失败记录",
                 "trigger": "cron",
-                "func": self._run_retransfer_task,
+                "func": self._run_scheduled_task,
                 "kwargs": {},
                 "cron": self._retransfer_cron
             })
 
-        # 清理假失败记录定时任务
-        if self._clean_failed_cron:
-            services.append({
-                "id": "TransferCleanerCleanFailed",
-                "name": "清理假失败记录",
-                "trigger": "cron",
-                "func": self._run_clean_failed_task,
-                "kwargs": {},
-                "cron": self._clean_failed_cron
-            })
-
         return services
+
+    def _run_scheduled_task(self):
+        """
+        定时任务：执行检测未上传和清理假失败
+        """
+        if self._retransfer_once:
+            self._run_retransfer_task()
+        if self._clean_failed:
+            self._run_clean_failed_task()
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """配置页面"""
@@ -1054,21 +1049,7 @@ class TransferCleaner(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "retransfer_cron",
-                                            "label": "定时执行周期",
-                                            "placeholder": "0 */6 * * *",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 8},
                                 "content": [
                                     {
                                         "component": "VAlert",
@@ -1076,7 +1057,7 @@ class TransferCleaner(_PluginBase):
                                             "type": "warning",
                                             "variant": "tonal",
                                             "density": "compact",
-                                            "text": "检测源文件仍存在但有转移记录的情况，重新整理。",
+                                            "text": "检测源文件仍存在但有转移记录的情况，删除记录并重新整理。",
                                         },
                                     }
                                 ],
@@ -1102,21 +1083,7 @@ class TransferCleaner(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "clean_failed_cron",
-                                            "label": "定时执行周期",
-                                            "placeholder": "0 */6 * * *",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 8},
                                 "content": [
                                     {
                                         "component": "VAlert",
@@ -1125,6 +1092,41 @@ class TransferCleaner(_PluginBase):
                                             "variant": "tonal",
                                             "density": "compact",
                                             "text": "清理失败记录中源文件已不存在的（实际已上传成功）。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    # 定时执行周期（两个功能共用）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "retransfer_cron",
+                                            "label": "定时执行周期",
+                                            "placeholder": "0 */6 * * *",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "text": "定时执行上方两个功能（检测未上传、清理假失败），留空则不定时执行。",
                                         },
                                     }
                                 ],
@@ -1285,7 +1287,6 @@ class TransferCleaner(_PluginBase):
             "retransfer_dirs": "",
             "retransfer_cron": "",
             "clean_failed": True,
-            "clean_failed_cron": "",
         }
 
     def get_page(self) -> List[dict]:
