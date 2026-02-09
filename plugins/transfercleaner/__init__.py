@@ -47,7 +47,7 @@ class TransferCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "1.3"
+    plugin_version = "1.4"
     # 插件作者
     plugin_author = "ikirito"
     # 作者主页
@@ -72,6 +72,8 @@ class TransferCleaner(_PluginBase):
     _exclude_keywords: str = ""
     _clean_dirs: str = ""
     _run_once: bool = False
+    _retransfer_once: bool = False
+    _retransfer_dirs: str = ""
     _observers: List[Observer] = None
     _transferhistory: Optional[TransferHistoryOper] = None
     # 事件去重缓存 {path: timestamp}
@@ -122,6 +124,8 @@ class TransferCleaner(_PluginBase):
             self._exclude_keywords = config.get("exclude_keywords", "")
             self._clean_dirs = config.get("clean_dirs", "")
             self._run_once = config.get("run_once", False)
+            self._retransfer_once = config.get("retransfer_once", False)
+            self._retransfer_dirs = config.get("retransfer_dirs", "")
             # 预编译排除关键词列表
             self._exclude_keywords_list = [
                 k.strip() for k in self._exclude_keywords.split("\n") if k.strip()
@@ -163,6 +167,18 @@ class TransferCleaner(_PluginBase):
                 name="TransferCleaner-Cleanup"
             ).start()
 
+        # 检查是否需要立即运行重新整理任务
+        if self._retransfer_once:
+            # 重置开关
+            self._retransfer_once = False
+            self.__update_config()
+            # 启动重新整理任务
+            threading.Thread(
+                target=self._run_retransfer_task,
+                daemon=True,
+                name="TransferCleaner-Retransfer"
+            ).start()
+
     def __update_config(self):
         """更新配置（用于重置 run_once 开关）"""
         self.update_config({
@@ -178,6 +194,8 @@ class TransferCleaner(_PluginBase):
             "exclude_keywords": self._exclude_keywords,
             "clean_dirs": self._clean_dirs,
             "run_once": False,
+            "retransfer_once": False,
+            "retransfer_dirs": self._retransfer_dirs,
         })
 
     def _parse_path_mappings(self) -> Dict[str, str]:
@@ -355,6 +373,121 @@ class TransferCleaner(_PluginBase):
             self.post_message(
                 mtype=NotificationType.SiteMessage,
                 title=f"【转移记录清理】{dry_run_tag}",
+                text=summary
+            )
+
+    def _run_retransfer_task(self):
+        """
+        运行重新整理任务：扫描已有转移记录但源文件仍存在的情况，
+        说明文件没有成功上传，需要重新整理
+        """
+        logger.info("TransferCleaner: 开始运行重新整理检测任务...")
+
+        # 解析检测目录
+        retransfer_dirs = [d.strip() for d in self._retransfer_dirs.split("\n") if d.strip()]
+        if not retransfer_dirs:
+            # 默认使用 /media/待上传
+            retransfer_dirs = ["/media/待上传"]
+
+        # 统计
+        total_checked = 0
+        need_retransfer = []
+
+        try:
+            from sqlalchemy import desc
+            from app.db.models.transferhistory import TransferHistory
+            from app.db import SessionFactory
+
+            with SessionFactory() as db:
+                for check_dir in retransfer_dirs:
+                    logger.info(f"TransferCleaner: 检测目录 {check_dir}")
+
+                    # 查询源路径在该目录下的记录
+                    records = db.query(TransferHistory).filter(
+                        TransferHistory.src.like(f"{check_dir}%")
+                    ).order_by(desc(TransferHistory.id)).limit(500).all()
+
+                    logger.info(f"TransferCleaner: 找到 {len(records)} 条匹配记录")
+
+                    for record in records:
+                        total_checked += 1
+                        src_path = record.src
+
+                        # 检查源文件是否仍然存在
+                        if os.path.exists(src_path):
+                            # 源文件仍存在，说明可能没有成功上传
+                            need_retransfer.append({
+                                "id": record.id,
+                                "src": src_path,
+                                "dest": record.dest,
+                                "title": getattr(record, 'title', ''),
+                            })
+                            logger.info(
+                                f"TransferCleaner: 发现未上传文件 "
+                                f"ID={record.id}, src={src_path}"
+                            )
+
+                        if len(need_retransfer) >= 100:
+                            logger.warning("TransferCleaner: 达到单次检测上限 100 条")
+                            break
+
+                    if len(need_retransfer) >= 100:
+                        break
+
+        except Exception as e:
+            logger.exception("TransferCleaner: 重新整理检测任务异常")
+            self.systemmessage.put(f"重新整理检测异常: {str(e)}", title="转移记录清理")
+            return
+
+        # 处理需要重新整理的文件
+        retransfer_count = 0
+        if need_retransfer and not self._dry_run:
+            try:
+                from app.chain.transfer import TransferChain
+                transfer_chain = TransferChain()
+
+                for item in need_retransfer:
+                    src_path = item["src"]
+                    try:
+                        # 先删除旧的转移记录
+                        self._transferhistory.delete(item["id"])
+                        logger.info(f"TransferCleaner: 已删除旧记录 ID={item['id']}")
+
+                        # 触发重新整理
+                        transfer_chain.process(Path(src_path))
+                        retransfer_count += 1
+                        logger.info(f"TransferCleaner: 已触发重新整理 {src_path}")
+
+                    except Exception as e:
+                        logger.exception(f"TransferCleaner: 重新整理失败 {src_path}")
+
+            except ImportError:
+                logger.error("TransferCleaner: 无法导入 TransferChain，跳过重新整理")
+
+        # 发送通知
+        dry_run_tag = "[模拟] " if self._dry_run else ""
+        summary = f"{dry_run_tag}重新整理检测完成\n"
+        summary += f"扫描记录: {total_checked} 条\n"
+        summary += f"发现未上传: {len(need_retransfer)} 条\n"
+        if not self._dry_run:
+            summary += f"已重新整理: {retransfer_count} 条\n"
+
+        if need_retransfer and len(need_retransfer) <= 10:
+            summary += "\n详情:\n"
+            for r in need_retransfer[:10]:
+                title = r.get('title', '')
+                if title:
+                    summary += f"- {title}\n"
+                else:
+                    src = r.get('src', '')
+                    summary += f"- {Path(src).name}\n"
+
+        logger.info(f"TransferCleaner: {summary}")
+
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title=f"【转移记录清理】{dry_run_tag}重新整理",
                 text=summary
             )
 
@@ -764,6 +897,40 @@ class TransferCleaner(_PluginBase):
                             },
                         ],
                     },
+                    # 重新整理检测
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "retransfer_once",
+                                            "label": "检测未上传文件",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "warning",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "text": "检测已有转移记录但源文件仍存在的情况（说明未成功上传），删除旧记录并重新整理。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
                     # 第二行：延迟删除
                     {
                         "component": "VRow",
@@ -878,6 +1045,27 @@ class TransferCleaner(_PluginBase):
                             }
                         ],
                     },
+                    # 重新整理目录
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "retransfer_dirs",
+                                            "label": "重新整理检测目录（留空默认 /media/待上传）",
+                                            "rows": 2,
+                                            "placeholder": "/media/待上传",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
                     # 第五行：不删除目录 + 排除关键词
                     {
                         "component": "VRow",
@@ -963,6 +1151,8 @@ class TransferCleaner(_PluginBase):
             "exclude_dirs": "",
             "exclude_keywords": "",
             "run_once": False,
+            "retransfer_once": False,
+            "retransfer_dirs": "",
         }
 
     def get_page(self) -> List[dict]:
