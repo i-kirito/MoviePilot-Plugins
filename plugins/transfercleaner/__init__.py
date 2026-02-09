@@ -47,7 +47,7 @@ class TransferCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "1.4"
+    plugin_version = "1.5"
     # 插件作者
     plugin_author = "ikirito"
     # 作者主页
@@ -74,6 +74,7 @@ class TransferCleaner(_PluginBase):
     _run_once: bool = False
     _retransfer_once: bool = False
     _retransfer_dirs: str = ""
+    _clean_failed: bool = False
     _observers: List[Observer] = None
     _transferhistory: Optional[TransferHistoryOper] = None
     # 事件去重缓存 {path: timestamp}
@@ -126,6 +127,7 @@ class TransferCleaner(_PluginBase):
             self._run_once = config.get("run_once", False)
             self._retransfer_once = config.get("retransfer_once", False)
             self._retransfer_dirs = config.get("retransfer_dirs", "")
+            self._clean_failed = config.get("clean_failed", False)
             # 预编译排除关键词列表
             self._exclude_keywords_list = [
                 k.strip() for k in self._exclude_keywords.split("\n") if k.strip()
@@ -196,6 +198,7 @@ class TransferCleaner(_PluginBase):
             "run_once": False,
             "retransfer_once": False,
             "retransfer_dirs": self._retransfer_dirs,
+            "clean_failed": self._clean_failed,
         })
 
     def _parse_path_mappings(self) -> Dict[str, str]:
@@ -376,7 +379,89 @@ class TransferCleaner(_PluginBase):
                 text=summary
             )
 
-    def _run_retransfer_task(self):
+        # 如果开启了清理失败记录，继续执行
+        if self._clean_failed:
+            self._run_clean_failed_task()
+
+    def _run_clean_failed_task(self):
+        """
+        清理失败记录：源文件已不存在（说明上传成功了）但记录状态是失败的
+        """
+        logger.info("TransferCleaner: 开始清理假失败记录...")
+
+        total_checked = 0
+        total_deleted = 0
+        deleted_records = []
+
+        try:
+            from sqlalchemy import desc
+            from app.db.models.transferhistory import TransferHistory
+            from app.db import SessionFactory
+
+            with SessionFactory() as db:
+                # 查询所有失败的记录
+                records = db.query(TransferHistory).filter(
+                    TransferHistory.status == False
+                ).order_by(desc(TransferHistory.id)).limit(500).all()
+
+                logger.info(f"TransferCleaner: 找到 {len(records)} 条失败记录")
+
+                for record in records:
+                    total_checked += 1
+
+                    # 将存储路径转换为本地路径
+                    local_path = self._convert_storage_to_local(record.src)
+
+                    # 如果源文件不存在，说明其实已经成功上传了
+                    if not os.path.exists(local_path):
+                        if self._dry_run:
+                            logger.info(
+                                f"[DryRun] TransferCleaner: 将删除假失败记录 "
+                                f"ID={record.id}, src={record.src}, errmsg={record.errmsg}"
+                            )
+                            total_deleted += 1
+                            deleted_records.append({
+                                "id": record.id,
+                                "src": record.src,
+                                "title": getattr(record, 'title', ''),
+                                "errmsg": record.errmsg
+                            })
+                        else:
+                            self._transferhistory.delete(record.id)
+                            logger.info(
+                                f"TransferCleaner: 已删除假失败记录 "
+                                f"ID={record.id}, src={record.src}"
+                            )
+                            total_deleted += 1
+                            deleted_records.append({
+                                "id": record.id,
+                                "src": record.src,
+                                "title": getattr(record, 'title', ''),
+                                "errmsg": record.errmsg
+                            })
+
+                    if total_deleted >= 500:
+                        break
+
+        except Exception as e:
+            logger.exception("TransferCleaner: 清理假失败记录异常")
+            return
+
+        if total_deleted > 0:
+            dry_run_tag = "[模拟] " if self._dry_run else ""
+            summary = f"{dry_run_tag}清理假失败记录完成\n"
+            summary += f"检查失败记录: {total_checked} 条\n"
+            summary += f"{'将删除' if self._dry_run else '已删除'}: {total_deleted} 条\n"
+            summary += "(源文件已不存在，说明实际已上传成功)"
+
+            logger.info(f"TransferCleaner: {summary}")
+
+            if self._notify:
+                self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title=f"【转移记录清理】{dry_run_tag}假失败记录",
+                    text=summary
+                )
         """
         运行重新整理任务：扫描已有转移记录但源文件仍存在的情况，
         说明文件没有成功上传，需要重新整理
@@ -931,6 +1016,40 @@ class TransferCleaner(_PluginBase):
                             },
                         ],
                     },
+                    # 清理假失败记录
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "clean_failed",
+                                            "label": "清理假失败记录",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "density": "compact",
+                                            "text": "清理失败记录中源文件已不存在的（说明实际已上传成功但记录为失败），在立即运行时一并执行。",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
                     # 第二行：延迟删除
                     {
                         "component": "VRow",
@@ -1153,6 +1272,7 @@ class TransferCleaner(_PluginBase):
             "run_once": False,
             "retransfer_once": False,
             "retransfer_dirs": "",
+            "clean_failed": False,
         }
 
     def get_page(self) -> List[dict]:
