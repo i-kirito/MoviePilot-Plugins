@@ -6,7 +6,6 @@ from typing import List, Tuple, Dict, Any, Optional
 from queue import Queue, Empty
 
 from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 from apscheduler.triggers.cron import CronTrigger
 
@@ -28,12 +27,16 @@ class FileMonitorHandler(FileSystemEventHandler):
 
     def on_deleted(self, event):
         """文件删除事件"""
+        from app.log import logger
+        logger.debug(f"TransferCleaner: [Watchdog] on_deleted 触发, is_dir={event.is_directory}, path={event.src_path}")
         if event.is_directory:
             return
         self.plugin.handle_file_event("deleted", event.src_path)
 
     def on_moved(self, event):
         """文件移动事件"""
+        from app.log import logger
+        logger.debug(f"TransferCleaner: [Watchdog] on_moved 触发, is_dir={event.is_directory}, src={event.src_path}, dest={event.dest_path}")
         if event.is_directory:
             return
         # 移动事件使用 src_path（旧路径）来匹配历史记录
@@ -48,7 +51,7 @@ class TransferCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "1.8"
+    plugin_version = "2.1.2"
     # 插件作者
     plugin_author = "i-kirito"
     # 作者主页
@@ -66,7 +69,6 @@ class TransferCleaner(_PluginBase):
     _dry_run: bool = True
     _delay_enabled: bool = False
     _delay_seconds: int = 10
-    _monitor_mode: str = "fast"
     _monitor_dirs: str = ""
     _path_mappings: str = ""
     _exclude_dirs: str = ""
@@ -120,7 +122,6 @@ class TransferCleaner(_PluginBase):
             self._dry_run = config.get("dry_run", True)
             self._delay_enabled = config.get("delay_enabled", False)
             self._delay_seconds = int(config.get("delay_seconds", 10) or 10)
-            self._monitor_mode = config.get("monitor_mode", "fast")
             self._monitor_dirs = config.get("monitor_dirs", "")
             self._path_mappings = config.get("path_mappings", "")
             self._exclude_dirs = config.get("exclude_dirs", "")
@@ -188,13 +189,8 @@ class TransferCleaner(_PluginBase):
             self.__update_config()
 
     def _run_retransfer_task_wrapper(self):
-        """重新整理任务包装器，完成后重置开关"""
-        try:
-            self._run_retransfer_task()
-        finally:
-            # 重置开关
-            self._retransfer_once = False
-            self.__update_config()
+        """重新整理任务包装器（立即执行，不重置开关）"""
+        self._run_retransfer_task()
 
     def __update_config(self):
         """更新配置（用于重置 run_once 开关）"""
@@ -204,14 +200,13 @@ class TransferCleaner(_PluginBase):
             "dry_run": self._dry_run,
             "delay_enabled": self._delay_enabled,
             "delay_seconds": self._delay_seconds,
-            "monitor_mode": self._monitor_mode,
             "monitor_dirs": self._monitor_dirs,
             "path_mappings": self._path_mappings,
             "exclude_dirs": self._exclude_dirs,
             "exclude_keywords": self._exclude_keywords,
             "clean_dirs": self._clean_dirs,
             "run_once": False,
-            "retransfer_once": False,
+            "retransfer_once": self._retransfer_once,
             "retransfer_dirs": self._retransfer_dirs,
             "retransfer_cron": self._retransfer_cron,
             "clean_failed": self._clean_failed,
@@ -650,12 +645,8 @@ class TransferCleaner(_PluginBase):
                 continue
 
             try:
-                if self._monitor_mode == "compatibility":
-                    # 兼容模式，使用轮询（适用于网络挂载）
-                    observer = PollingObserver(timeout=10)
-                else:
-                    # 快速模式，使用系统事件
-                    observer = Observer(timeout=10)
+                # 使用兼容模式（轮询），适用于网络挂载目录
+                observer = PollingObserver(timeout=10)
 
                 self._observers.append(observer)
                 observer.schedule(
@@ -666,8 +657,7 @@ class TransferCleaner(_PluginBase):
                 observer.daemon = True
                 observer.start()
 
-                mode_name = "兼容模式" if self._monitor_mode == "compatibility" else "极速模式"
-                logger.info(f"TransferCleaner: {mon_path} 目录监控启动 [{mode_name}]")
+                logger.info(f"TransferCleaner: {mon_path} 目录监控启动 [兼容模式], observer.is_alive={observer.is_alive()}")
 
             except Exception as e:
                 logger.exception(f"TransferCleaner: 启动目录监控失败 {mon_path}")
@@ -746,10 +736,10 @@ class TransferCleaner(_PluginBase):
 
             # 事件去重
             if self._is_duplicate_event(src_path):
-                logger.debug(f"TransferCleaner: 重复事件，跳过 {src_path}")
+                logger.info(f"TransferCleaner: 重复事件，跳过 {src_path}")
                 return
 
-            logger.info(f"TransferCleaner: 检测到{event_type}事件 - {src_path}")
+            logger.info(f"TransferCleaner: 检测到文件{event_type}事件 - {src_path}")
 
             if self._delay_enabled:
                 # 加入延迟队列
@@ -891,19 +881,13 @@ class TransferCleaner(_PluginBase):
                           dest_path: str, result: dict):
         """发送通知"""
         dry_run_tag = "[模拟] " if result["dry_run"] else ""
-        event_name = "移动" if event_type == "moved" else "删除"
 
-        title = f"【转移记录清理】{dry_run_tag}"
+        # 提取文件名
+        file_name = Path(src_path).name
 
-        text = f"检测到文件{event_name}事件\n"
-        text += f"源路径: {src_path}\n"
-        if dest_path:
-            text += f"目标路径: {dest_path}\n"
+        title = f"【转移记录清理】{dry_run_tag}已删除 {result['deleted_count']} 条记录"
 
-        if result["dry_run"]:
-            text += f"将删除 {result['deleted_count']} 条历史记录"
-        else:
-            text += f"已删除 {result['deleted_count']} 条历史记录"
+        text = f"{file_name}"
 
         self.post_message(
             mtype=NotificationType.SiteMessage,
@@ -944,7 +928,8 @@ class TransferCleaner(_PluginBase):
         """
         定时任务：执行检测未上传和清理假失败
         """
-        self._run_retransfer_task()
+        if self._retransfer_once:
+            self._run_retransfer_task()
         if self._clean_failed:
             self._run_clean_failed_task()
 
@@ -1189,23 +1174,6 @@ class TransferCleaner(_PluginBase):
                                     }
                                 ],
                             },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "monitor_mode",
-                                            "label": "监控模式",
-                                            "items": [
-                                                {"title": "极速模式", "value": "fast"},
-                                                {"title": "兼容模式", "value": "compatibility"},
-                                            ],
-                                        },
-                                    }
-                                ],
-                            },
                         ],
                     },
                     # 第三行：监控目录
@@ -1220,9 +1188,9 @@ class TransferCleaner(_PluginBase):
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "monitor_dirs",
-                                            "label": "监控目录",
+                                            "label": "监控目录（仅本地目录支持实时监控，网盘挂载目录请用定时任务）",
                                             "rows": 4,
-                                            "placeholder": "/media/115/转存\n/media/待上传",
+                                            "placeholder": "/media/待上传",
                                         },
                                     }
                                 ],
@@ -1262,9 +1230,9 @@ class TransferCleaner(_PluginBase):
                                         "component": "VTextarea",
                                         "props": {
                                             "model": "clean_dirs",
-                                            "label": "清理目录（立即运行使用，留空则使用监控目录）",
+                                            "label": "定时清理目录（网盘挂载目录放这里，通过定时任务清理）",
                                             "rows": 3,
-                                            "placeholder": "/media/115/转存\n留空则使用上方的监控目录",
+                                            "placeholder": "/media/115/转存",
                                         },
                                     }
                                 ],
@@ -1300,7 +1268,6 @@ class TransferCleaner(_PluginBase):
             "dry_run": True,
             "delay_enabled": False,
             "delay_seconds": 10,
-            "monitor_mode": "fast",
             "monitor_dirs": "",
             "path_mappings": "",
             "clean_dirs": "",
