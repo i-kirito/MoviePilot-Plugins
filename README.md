@@ -47,10 +47,11 @@ https://github.com/i-kirito/mp-plugin
 mp-plugin/
 ├── icons/                 # 插件图标
 │   └── transfercleaner.png
-├── plugins/               # 插件代码
+├── plugins.v2/            # V2 插件代码
 │   └── transfercleaner/
 │       └── __init__.py
-├── package.json           # 插件仓库元数据
+├── package.v2.json        # V2 插件仓库元数据
+├── LICENSE
 └── README.md
 ```
 
