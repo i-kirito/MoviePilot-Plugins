@@ -79,7 +79,7 @@ class TransferCleaner(_PluginBase):
     _retransfer_dirs: str = ""
     _retransfer_cron: str = ""
     _clean_failed: bool = False
-    _observers: List[Observer] = None
+    _observers: List[PollingObserver] = None
     _transferhistory: Optional[TransferHistoryOper] = None
     # 事件去重缓存 {path: timestamp}
     _event_cache: Dict[str, float] = None
