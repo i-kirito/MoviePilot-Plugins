@@ -49,9 +49,9 @@ class TransferCleaner(_PluginBase):
     # 插件版本
     plugin_version = "1.6"
     # 插件作者
-    plugin_author = "ikirito"
+    plugin_author = "i-kirito"
     # 作者主页
-    author_url = "https://github.com/ikirito"
+    author_url = "https://github.com/i-kirito"
     # 插件配置项ID前缀
     plugin_config_prefix = "transfercleaner_"
     # 加载顺序

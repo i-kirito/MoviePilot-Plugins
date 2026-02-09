@@ -5,7 +5,7 @@
     "labels": "文件整理",
     "version": "1.6",
     "icon": "transfercleaner.png",
-    "author": "ikirito",
+    "author": "i-kirito",
     "level": 1,
     "history": {
       "v1.6": "检测未上传文件功能支持定时任务执行",
