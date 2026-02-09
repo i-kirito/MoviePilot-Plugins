@@ -1266,42 +1266,6 @@ class TransferCleaner(_PluginBase):
                             },
                         ],
                     },
-                    # 第五行：不删除目录 + 排除关键词
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "exclude_dirs",
-                                            "label": "不删除目录",
-                                            "rows": 3,
-                                            "placeholder": "该目录下的文件变化不会触发删除记录",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "exclude_keywords",
-                                            "label": "排除关键词",
-                                            "rows": 3,
-                                            "placeholder": "@eaDir\n.DS_Store",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
                 ],
             }
         ], {
