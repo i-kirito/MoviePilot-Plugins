@@ -7,7 +7,6 @@
     "icon": "transfercleaner.png",
     "author": "ikirito",
     "level": 1,
-    "v2": true,
     "history": {
       "v1.6": "检测未上传文件功能支持定时任务执行",
       "v1.5.1": "修复保存配置时页面不关闭的问题",
