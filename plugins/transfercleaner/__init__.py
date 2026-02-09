@@ -1233,40 +1233,6 @@ class TransferCleaner(_PluginBase):
                             },
                         ],
                     },
-                    # 提示信息
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "warning",
-                                            "variant": "tonal",
-                                            "text": "路径映射格式：本地目录:存储类型:存储路径。例如 /media/115/转存:u115:/115/转存 表示将本地 /media/115/转存 目录映射到 115 网盘的 /115/转存 路径。",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "info",
-                                            "variant": "tonal",
-                                            "text": "支持的存储类型：local（本地）、u115（115网盘）、alipan（阿里云盘）、rclone（Rclone挂载）、alist（Alist挂载）。",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
                 ],
             }
         ], {
