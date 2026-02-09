@@ -1054,7 +1054,21 @@ class TransferCleaner(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 8},
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "retransfer_cron",
+                                            "label": "定时执行周期",
+                                            "placeholder": "0 */6 * * *",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VAlert",
@@ -1062,7 +1076,7 @@ class TransferCleaner(_PluginBase):
                                             "type": "warning",
                                             "variant": "tonal",
                                             "density": "compact",
-                                            "text": "检测已有转移记录但源文件仍存在的情况（说明未成功上传），删除旧记录并重新整理。",
+                                            "text": "检测源文件仍存在但有转移记录的情况，重新整理。",
                                         },
                                     }
                                 ],
@@ -1237,7 +1251,7 @@ class TransferCleaner(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 8},
+                                "props": {"cols": 12},
                                 "content": [
                                     {
                                         "component": "VTextarea",
@@ -1246,20 +1260,6 @@ class TransferCleaner(_PluginBase):
                                             "label": "重新整理检测目录（留空默认 /media/待上传）",
                                             "rows": 2,
                                             "placeholder": "/media/待上传",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "retransfer_cron",
-                                            "label": "定时执行周期",
-                                            "placeholder": "0 */6 * * *",
                                         },
                                     }
                                 ],
