@@ -51,7 +51,7 @@ class TransferCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "2.1.2"
+    plugin_version = "2.2.0"
     # 插件作者
     plugin_author = "i-kirito"
     # 作者主页
@@ -100,6 +100,11 @@ class TransferCleaner(_PluginBase):
     _delay_queue: Queue = None
     _delay_thread: threading.Thread = None
     _stop_event: threading.Event = None
+    # 通知聚合
+    _notify_buffer: List[str] = None
+    _notify_buffer_lock: threading.Lock = None
+    _notify_timer: threading.Timer = None
+    _notify_delay: int = 10  # 通知延迟秒数
 
     def init_plugin(self, config: dict = None):
         """初始化插件"""
@@ -113,6 +118,10 @@ class TransferCleaner(_PluginBase):
         self._reverse_mappings_dict = {}
         self._delay_queue = Queue()
         self._stop_event = threading.Event()
+        # 通知聚合初始化
+        self._notify_buffer = []
+        self._notify_buffer_lock = threading.Lock()
+        self._notify_timer = None
 
         self._transferhistory = TransferHistoryOper()
 
@@ -882,12 +891,48 @@ class TransferCleaner(_PluginBase):
         """发送通知"""
         dry_run_tag = "[模拟] " if result["dry_run"] else ""
 
-        # 提取文件名
+        # 提取文件名并加入通知缓冲区
         file_name = Path(src_path).name
+        self._add_to_notify_buffer(file_name, result["dry_run"])
 
-        title = f"【转移记录清理】{dry_run_tag}已删除 {result['deleted_count']} 条记录"
+    def _add_to_notify_buffer(self, file_name: str, dry_run: bool):
+        """将文件名加入通知缓冲区，延迟聚合发送"""
+        with self._notify_buffer_lock:
+            self._notify_buffer.append(file_name)
 
-        text = f"{file_name}"
+            # 取消现有定时器
+            if self._notify_timer:
+                self._notify_timer.cancel()
+
+            # 设置新的定时器
+            self._notify_timer = threading.Timer(
+                self._notify_delay,
+                self._flush_notify_buffer,
+                args=[dry_run]
+            )
+            self._notify_timer.daemon = True
+            self._notify_timer.start()
+
+    def _flush_notify_buffer(self, dry_run: bool = False):
+        """发送聚合通知"""
+        with self._notify_buffer_lock:
+            if not self._notify_buffer:
+                return
+
+            files = self._notify_buffer.copy()
+            self._notify_buffer.clear()
+
+        dry_run_tag = "[模拟] " if dry_run else ""
+        count = len(files)
+
+        title = f"【转移记录清理】{dry_run_tag}已删除 {count} 条记录"
+
+        # 按剧集名分组
+        if count <= 5:
+            text = "\n".join(files)
+        else:
+            # 超过5个文件，只显示前5个 + 省略提示
+            text = "\n".join(files[:5]) + f"\n... 等共 {count} 个文件"
 
         self.post_message(
             mtype=NotificationType.SiteMessage,
