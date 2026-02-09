@@ -47,7 +47,7 @@ class TransferCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "1.5"
+    plugin_version = "1.5.1"
     # 插件作者
     plugin_author = "ikirito"
     # 作者主页
@@ -159,27 +159,39 @@ class TransferCleaner(_PluginBase):
 
         # 检查是否需要立即运行清理任务
         if self._run_once:
-            # 重置开关
-            self._run_once = False
-            self.__update_config()
-            # 启动清理任务
+            # 启动清理任务（在任务完成后重置开关）
             threading.Thread(
-                target=self._run_cleanup_task,
+                target=self._run_cleanup_task_wrapper,
                 daemon=True,
                 name="TransferCleaner-Cleanup"
             ).start()
 
         # 检查是否需要立即运行重新整理任务
         if self._retransfer_once:
-            # 重置开关
-            self._retransfer_once = False
-            self.__update_config()
-            # 启动重新整理任务
+            # 启动重新整理任务（在任务完成后重置开关）
             threading.Thread(
-                target=self._run_retransfer_task,
+                target=self._run_retransfer_task_wrapper,
                 daemon=True,
                 name="TransferCleaner-Retransfer"
             ).start()
+
+    def _run_cleanup_task_wrapper(self):
+        """清理任务包装器，完成后重置开关"""
+        try:
+            self._run_cleanup_task()
+        finally:
+            # 重置开关
+            self._run_once = False
+            self.__update_config()
+
+    def _run_retransfer_task_wrapper(self):
+        """重新整理任务包装器，完成后重置开关"""
+        try:
+            self._run_retransfer_task()
+        finally:
+            # 重置开关
+            self._retransfer_once = False
+            self.__update_config()
 
     def __update_config(self):
         """更新配置（用于重置 run_once 开关）"""
