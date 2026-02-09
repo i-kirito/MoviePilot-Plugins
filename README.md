@@ -7,7 +7,7 @@ ikirito 的 MoviePilot V2 插件仓库
 在 MoviePilot 的「设置」-「插件」-「安装插件」中添加本仓库地址：
 
 ```
-https://github.com/i-kirito/mp-plugin
+https://github.com/i-kirito/MoviePilot-Plugins
 ```
 
 ## 插件列表
