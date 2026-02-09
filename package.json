@@ -3,11 +3,12 @@
     "name": "转移记录清理",
     "description": "监控目录文件变化，自动删除对应的转移历史记录，适用于网盘上传整理场景。",
     "labels": "整理",
-    "version": "1.5.1",
+    "version": "1.6",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png",
     "author": "ikirito",
     "level": 1,
     "history": {
+      "v1.6": "检测未上传文件功能支持定时任务执行",
       "v1.5.1": "修复保存配置时页面不关闭的问题",
       "v1.5": "新增清理假失败记录功能（源文件已不存在但记录为失败）",
       "v1.4": "新增检测未上传文件并重新整理功能",

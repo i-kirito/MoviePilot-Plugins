@@ -47,7 +47,7 @@ class TransferCleaner(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "1.5.1"
+    plugin_version = "1.6"
     # 插件作者
     plugin_author = "ikirito"
     # 作者主页
@@ -74,6 +74,7 @@ class TransferCleaner(_PluginBase):
     _run_once: bool = False
     _retransfer_once: bool = False
     _retransfer_dirs: str = ""
+    _retransfer_cron: str = ""
     _clean_failed: bool = False
     _observers: List[Observer] = None
     _transferhistory: Optional[TransferHistoryOper] = None
@@ -127,6 +128,7 @@ class TransferCleaner(_PluginBase):
             self._run_once = config.get("run_once", False)
             self._retransfer_once = config.get("retransfer_once", False)
             self._retransfer_dirs = config.get("retransfer_dirs", "")
+            self._retransfer_cron = config.get("retransfer_cron", "")
             self._clean_failed = config.get("clean_failed", False)
             # 预编译排除关键词列表
             self._exclude_keywords_list = [
@@ -210,6 +212,7 @@ class TransferCleaner(_PluginBase):
             "run_once": False,
             "retransfer_once": False,
             "retransfer_dirs": self._retransfer_dirs,
+            "retransfer_cron": self._retransfer_cron,
             "clean_failed": self._clean_failed,
         })
 
@@ -474,6 +477,8 @@ class TransferCleaner(_PluginBase):
                     title=f"【转移记录清理】{dry_run_tag}假失败记录",
                     text=summary
                 )
+
+    def _run_retransfer_task(self):
         """
         运行重新整理任务：扫描已有转移记录但源文件仍存在的情况，
         说明文件没有成功上传，需要重新整理
@@ -888,6 +893,22 @@ class TransferCleaner(_PluginBase):
         """获取插件状态"""
         return self._enabled
 
+    def get_service(self) -> List[Dict[str, Any]]:
+        """
+        注册定时任务
+        """
+        if not self._enabled or not self._retransfer_cron:
+            return []
+
+        return [{
+            "id": "TransferCleanerRetransfer",
+            "name": "检测未上传文件并重新整理",
+            "trigger": "cron",
+            "func": self._run_retransfer_task,
+            "kwargs": {},
+            "cron": self._retransfer_cron
+        }]
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """配置页面"""
         return [
@@ -1182,7 +1203,7 @@ class TransferCleaner(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
+                                "props": {"cols": 12, "md": 8},
                                 "content": [
                                     {
                                         "component": "VTextarea",
@@ -1194,7 +1215,21 @@ class TransferCleaner(_PluginBase):
                                         },
                                     }
                                 ],
-                            }
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "retransfer_cron",
+                                            "label": "定时执行周期",
+                                            "placeholder": "0 */6 * * *",
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     # 第五行：不删除目录 + 排除关键词
@@ -1250,6 +1285,7 @@ class TransferCleaner(_PluginBase):
             "run_once": False,
             "retransfer_once": False,
             "retransfer_dirs": "",
+            "retransfer_cron": "",
             "clean_failed": False,
         }
 
