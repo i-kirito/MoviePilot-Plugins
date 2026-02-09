@@ -8,6 +8,7 @@ from queue import Queue, Empty
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
+from apscheduler.triggers.cron import CronTrigger
 
 from app.db.transferhistory_oper import TransferHistoryOper
 from app.log import logger
@@ -921,27 +922,29 @@ class TransferCleaner(_PluginBase):
         if not self._enabled:
             return []
 
-        services = []
+        cron_exp = (self._retransfer_cron or "").strip()
+        if not cron_exp:
+            return []
 
-        # 定时执行检测未上传和清理假失败任务
-        if self._retransfer_cron:
-            services.append({
-                "id": "TransferCleanerScheduled",
-                "name": "检测未上传文件/清理假失败记录",
-                "trigger": "cron",
-                "func": self._run_scheduled_task,
-                "kwargs": {},
-                "cron": self._retransfer_cron
-            })
+        try:
+            trigger = CronTrigger.from_crontab(cron_exp)
+        except Exception as e:
+            logger.error(f"TransferCleaner: 无效的定时任务表达式 `{cron_exp}`: {e}")
+            return []
 
-        return services
+        return [{
+            "id": "TransferCleanerScheduled",
+            "name": "检测未上传文件/清理假失败记录",
+            "trigger": trigger,
+            "func": self._run_scheduled_task,
+            "kwargs": {}
+        }]
 
     def _run_scheduled_task(self):
         """
         定时任务：执行检测未上传和清理假失败
         """
-        if self._retransfer_once:
-            self._run_retransfer_task()
+        self._run_retransfer_task()
         if self._clean_failed:
             self._run_clean_failed_task()
 
