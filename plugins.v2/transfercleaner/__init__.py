@@ -374,9 +374,6 @@ class TransferCleaner(_PluginBase):
                     ).order_by(desc(TransferHistory.id))
 
                     for record in query.yield_per(200):
-                        if self._stop_event.is_set():
-                            logger.info("TransferCleaner: 清理任务收到停止信号，退出")
-                            return
                         total_checked += 1
 
                         # 将存储路径转换为本地路径
@@ -473,9 +470,6 @@ class TransferCleaner(_PluginBase):
                 ).order_by(desc(TransferHistory.id)).limit(500)
 
                 for record in query.yield_per(100):
-                    if self._stop_event.is_set():
-                        logger.info("TransferCleaner: 失败记录处理收到停止信号，退出")
-                        return
                     total_checked += 1
 
                     # 将存储路径转换为本地路径
@@ -590,9 +584,6 @@ class TransferCleaner(_PluginBase):
                     ).order_by(desc(TransferHistory.id)).limit(500)
 
                     for record in query.yield_per(100):
-                        if self._stop_event.is_set():
-                            logger.info("TransferCleaner: 重新整理检测收到停止信号，退出")
-                            return
                         total_checked += 1
                         src_path = record.src
 
@@ -628,8 +619,6 @@ class TransferCleaner(_PluginBase):
             transfer_chain = self._create_transfer_chain()
 
             for item in need_retransfer:
-                if self._stop_event.is_set():
-                    break
                 src_path = item["src"]
 
                 # 先整理后删除（确保整理成功才删记录）
