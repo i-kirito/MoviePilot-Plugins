@@ -508,10 +508,10 @@ class TransferCleaner(_PluginBase):
         """
         logger.info("TransferCleaner: 开始运行重新整理检测任务...")
 
-        # 直接使用监控目录
-        retransfer_dirs = [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]
+        # 使用用户配置的重新整理检测目录
+        retransfer_dirs = [d.strip() for d in self._retransfer_dirs.split("\n") if d.strip()]
         if not retransfer_dirs:
-            logger.warning("TransferCleaner: 未配置监控目录，跳过重新整理检测")
+            logger.warning("TransferCleaner: 未配置重新整理检测目录，跳过")
             return
 
         # 统计
@@ -1224,6 +1224,27 @@ class TransferCleaner(_PluginBase):
                                     }
                                 ],
                             }
+                        ],
+                    },
+                    # 重新整理检测目录
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "retransfer_dirs",
+                                            "label": "重新整理检测目录（检测有记录但文件仍存在的目录）",
+                                            "rows": 2,
+                                            "placeholder": "/media/downloads",
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                 ],
