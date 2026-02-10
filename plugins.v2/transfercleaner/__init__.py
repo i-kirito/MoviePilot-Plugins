@@ -175,6 +175,9 @@ class TransferCleaner(_PluginBase):
         # 停止现有监控
         self.stop_service()
 
+        # 重置停止信号，为新线程准备干净状态
+        self._stop_event = threading.Event()
+
         if self._enabled:
             self._start_monitoring()
             # 启动延迟删除线程
