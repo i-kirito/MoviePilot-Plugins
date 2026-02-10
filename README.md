@@ -16,7 +16,7 @@ https://github.com/i-kirito/MoviePilot-Plugins
 
 | 插件 | 版本 | 说明 |
 |------|------|------|
-| TransferCleaner | v2.3.0 | 转移记录清理 - 监控目录文件变化，自动删除对应的转移历史记录 |
+| TransferCleaner | v2.1.0 | 转移记录清理 - 监控目录文件变化，自动删除对应的转移历史记录 |
 
 ---
 
