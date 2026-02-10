@@ -2,17 +2,26 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Optional
 from queue import Queue, Empty
+from typing import List, Tuple, Dict, Any, Optional
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import desc
+from sqlalchemy.exc import SQLAlchemyError
 
+from app.db import SessionFactory
+from app.db.models.transferhistory import TransferHistory
 from app.db.transferhistory_oper import TransferHistoryOper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
+
+try:
+    from app.chain.transfer import TransferChain
+except ImportError:
+    TransferChain = None
 
 
 class FileMonitorHandler(FileSystemEventHandler):
@@ -27,7 +36,6 @@ class FileMonitorHandler(FileSystemEventHandler):
 
     def on_deleted(self, event):
         """文件删除事件"""
-        from app.log import logger
         logger.debug(f"TransferCleaner: [Watchdog] on_deleted 触发, is_dir={event.is_directory}, path={event.src_path}")
         if event.is_directory:
             return
@@ -35,7 +43,6 @@ class FileMonitorHandler(FileSystemEventHandler):
 
     def on_moved(self, event):
         """文件移动事件"""
-        from app.log import logger
         logger.debug(f"TransferCleaner: [Watchdog] on_moved 触发, is_dir={event.is_directory}, src={event.src_path}, dest={event.dest_path}")
         if event.is_directory:
             return
@@ -94,6 +101,9 @@ class TransferCleaner(_PluginBase):
     _reverse_mappings_dict: Dict[str, str] = None
     # 去重时间窗口（秒）
     _dedupe_ttl: int = 3
+    # 事件缓存清理周期（秒）
+    _event_cache_cleanup_interval: int = 30
+    _last_event_cache_cleanup: float = 0
     # 临时文件后缀（全部小写）
     _temp_suffixes: List[str] = [".!qb", ".part", ".mp", ".tmp"]
     # 延迟删除队列
@@ -112,6 +122,7 @@ class TransferCleaner(_PluginBase):
         self._observers = []
         self._event_cache = {}
         self._event_cache_lock = threading.Lock()
+        self._last_event_cache_cleanup = time.time()
         self._exclude_keywords_list = []
         self._exclude_dirs_list = []
         self._path_mappings_dict = {}
@@ -257,7 +268,7 @@ class TransferCleaner(_PluginBase):
 
                 logger.info(f"TransferCleaner: 路径映射 {local_path} -> {mappings[local_path]}")
 
-            except Exception as e:
+            except (AttributeError, TypeError, ValueError) as e:
                 logger.warning(f"TransferCleaner: 解析路径映射失败 {line}: {e}")
 
         return mappings
@@ -279,6 +290,43 @@ class TransferCleaner(_PluginBase):
 
         # 没有匹配的映射，返回原路径
         return storage_path
+
+    @staticmethod
+    def _build_record_info(record) -> Dict[str, Any]:
+        """构建统一的记录展示结构"""
+        return {
+            "id": record.id,
+            "src": record.src,
+            "title": getattr(record, "title", "")
+        }
+
+    def _create_transfer_chain(self) -> Optional[Any]:
+        """创建整理链实例（统一处理导入/初始化异常）"""
+        transfer_chain_cls = TransferChain
+        # 模块级导入失败时，运行时再尝试一次（避免因加载时序导致功能永久不可用）
+        if transfer_chain_cls is None:
+            try:
+                from app.chain.transfer import TransferChain as transfer_chain_cls
+            except ImportError:
+                logger.error("TransferCleaner: TransferChain 模块未加载")
+                return None
+        try:
+            return transfer_chain_cls()
+        except (TypeError, RuntimeError, ValueError):
+            logger.exception("TransferCleaner: 初始化 TransferChain 失败")
+            return None
+
+    @staticmethod
+    def _trigger_retransfer(transfer_chain, src_path: str) -> bool:
+        """触发单个文件重新整理"""
+        if not transfer_chain:
+            return False
+        try:
+            transfer_chain.process(Path(src_path))
+            return True
+        except (OSError, RuntimeError, ValueError):
+            logger.exception(f"TransferCleaner: 重新整理失败 {src_path}")
+            return False
 
     def _run_cleanup_task(self):
         """
@@ -309,25 +357,23 @@ class TransferCleaner(_PluginBase):
         total_checked = 0
         total_deleted = 0
         deleted_records = []
+        pending_delete_records = []
 
         try:
-            from sqlalchemy import desc
-            from app.db.models.transferhistory import TransferHistory
-            from app.db import SessionFactory
-
             with SessionFactory() as db:
                 # 遍历每个存储路径前缀
                 for storage_prefix in storage_prefixes:
                     logger.info(f"TransferCleaner: 扫描存储路径前缀 {storage_prefix}")
 
-                    # 查询匹配的记录
-                    records = db.query(TransferHistory).filter(
+                    # 流式查询匹配记录
+                    query = db.query(TransferHistory).filter(
                         TransferHistory.src.like(f"{storage_prefix}%")
-                    ).order_by(desc(TransferHistory.id)).all()
+                    ).order_by(desc(TransferHistory.id))
 
-                    logger.info(f"TransferCleaner: 找到 {len(records)} 条匹配记录")
-
-                    for record in records:
+                    for record in query.yield_per(200):
+                        if self._stop_event.is_set():
+                            logger.info("TransferCleaner: 清理任务收到停止信号，退出")
+                            return
                         total_checked += 1
 
                         # 将存储路径转换为本地路径
@@ -337,43 +383,42 @@ class TransferCleaner(_PluginBase):
                         if os.path.exists(local_path):
                             continue
 
-                        # 文件不存在，需要删除记录
-                        if self._dry_run:
-                            logger.info(
-                                f"[DryRun] TransferCleaner: 将删除记录 "
-                                f"ID={record.id}, src={record.src}"
-                            )
-                            total_deleted += 1
-                            deleted_records.append({
-                                "id": record.id,
-                                "src": record.src,
-                                "title": getattr(record, 'title', '')
-                            })
-                        else:
-                            self._transferhistory.delete(record.id)
-                            logger.info(
-                                f"TransferCleaner: 已删除记录 "
-                                f"ID={record.id}, src={record.src}"
-                            )
-                            total_deleted += 1
-                            deleted_records.append({
-                                "id": record.id,
-                                "src": record.src,
-                                "title": getattr(record, 'title', '')
-                            })
+                        pending_delete_records.append(self._build_record_info(record))
 
                         # 防止删除过多
-                        if total_deleted >= 1000:
+                        if len(pending_delete_records) >= 1000:
                             logger.warning("TransferCleaner: 达到单次清理上限 1000 条")
                             break
 
-                    if total_deleted >= 1000:
+                    if len(pending_delete_records) >= 1000:
                         break
 
-        except Exception as e:
+        except (SQLAlchemyError, OSError) as e:
             logger.exception("TransferCleaner: 清理任务异常")
             self.systemmessage.put(f"清理任务异常: {str(e)}", title="转移记录清理")
             return
+
+        # 在读取游标关闭后执行删除，避免 DB 锁竞争
+        if self._dry_run:
+            total_deleted = len(pending_delete_records)
+            deleted_records = pending_delete_records
+            for item in pending_delete_records:
+                logger.info(
+                    f"[DryRun] TransferCleaner: 将删除记录 "
+                    f"ID={item['id']}, src={item['src']}"
+                )
+        else:
+            for item in pending_delete_records:
+                try:
+                    self._transferhistory.delete(item["id"])
+                    total_deleted += 1
+                    deleted_records.append(item)
+                    logger.info(
+                        f"TransferCleaner: 已删除记录 "
+                        f"ID={item['id']}, src={item['src']}"
+                    )
+                except SQLAlchemyError:
+                    logger.exception(f"TransferCleaner: 删除记录失败 ID={item['id']}")
 
         # 发送通知
         dry_run_tag = "[模拟] " if self._dry_run else ""
@@ -414,29 +459,20 @@ class TransferCleaner(_PluginBase):
         total_checked = 0
         deleted_count = 0
         retry_count = 0
+        pending_delete_ids = []
+        pending_retry_items = []
 
         try:
-            from sqlalchemy import desc
-            from app.db.models.transferhistory import TransferHistory
-            from app.db import SessionFactory
-            from app.chain.transfer import TransferChain
-
-            transfer_chain = None
-            if not self._dry_run:
-                try:
-                    transfer_chain = TransferChain()
-                except ImportError:
-                    logger.error("TransferCleaner: 无法导入 TransferChain")
-
             with SessionFactory() as db:
-                # 查询所有失败的记录
-                records = db.query(TransferHistory).filter(
+                # 流式查询所有失败的记录
+                query = db.query(TransferHistory).filter(
                     TransferHistory.status == False
-                ).order_by(desc(TransferHistory.id)).limit(500).all()
+                ).order_by(desc(TransferHistory.id)).limit(500)
 
-                logger.info(f"TransferCleaner: 找到 {len(records)} 条失败记录")
-
-                for record in records:
+                for record in query.yield_per(100):
+                    if self._stop_event.is_set():
+                        logger.info("TransferCleaner: 失败记录处理收到停止信号，退出")
+                        return
                     total_checked += 1
 
                     # 将存储路径转换为本地路径
@@ -451,17 +487,11 @@ class TransferCleaner(_PluginBase):
                             )
                             retry_count += 1
                         else:
-                            # 删除旧记录并重新整理
-                            self._transferhistory.delete(record.id)
-                            logger.info(f"TransferCleaner: 已删除失败记录 ID={record.id}")
-
-                            if transfer_chain:
-                                try:
-                                    transfer_chain.process(Path(local_path))
-                                    retry_count += 1
-                                    logger.info(f"TransferCleaner: 已触发重新整理 {local_path}")
-                                except Exception as e:
-                                    logger.exception(f"TransferCleaner: 重新整理失败 {local_path}")
+                            pending_retry_items.append({
+                                "id": record.id,
+                                "src": record.src,
+                                "local_path": local_path,
+                            })
                     else:
                         # 源文件不存在，说明实际已上传成功，删除错误记录
                         if self._dry_run:
@@ -471,20 +501,45 @@ class TransferCleaner(_PluginBase):
                             )
                             deleted_count += 1
                         else:
-                            self._transferhistory.delete(record.id)
-                            logger.info(
-                                f"TransferCleaner: 已删除假失败记录 "
-                                f"ID={record.id}, src={record.src}"
-                            )
-                            deleted_count += 1
+                            pending_delete_ids.append(record.id)
 
-                    if deleted_count + retry_count >= 100:
+                    current_count = (
+                        deleted_count + retry_count
+                        if self._dry_run
+                        else len(pending_delete_ids) + len(pending_retry_items)
+                    )
+                    if current_count >= 100:
                         logger.warning("TransferCleaner: 达到单次处理上限 100 条")
                         break
 
-        except Exception as e:
+        except (SQLAlchemyError, OSError) as e:
             logger.exception("TransferCleaner: 处理失败记录异常")
             return
+
+        # 在读取游标关闭后执行写入操作，避免 DB 锁竞争
+        if not self._dry_run:
+            transfer_chain = self._create_transfer_chain()
+
+            # 删除假失败记录
+            for record_id in pending_delete_ids:
+                try:
+                    self._transferhistory.delete(record_id)
+                    deleted_count += 1
+                    logger.info(f"TransferCleaner: 已删除假失败记录 ID={record_id}")
+                except SQLAlchemyError:
+                    logger.exception(f"TransferCleaner: 删除假失败记录异常 ID={record_id}")
+
+            # 先整理后删除（确保整理成功才删记录，避免记录丢失）
+            for item in pending_retry_items:
+                if self._trigger_retransfer(transfer_chain, item["local_path"]):
+                    try:
+                        self._transferhistory.delete(item["id"])
+                        retry_count += 1
+                        logger.info(f"TransferCleaner: 已触发重新整理并删除记录 ID={item['id']}")
+                    except SQLAlchemyError:
+                        logger.exception(f"TransferCleaner: 删除记录异常 ID={item['id']}")
+                else:
+                    logger.warning(f"TransferCleaner: 重新整理失败，保留记录 ID={item['id']}")
 
         if deleted_count > 0 or retry_count > 0:
             dry_run_tag = "[模拟] " if self._dry_run else ""
@@ -522,22 +577,19 @@ class TransferCleaner(_PluginBase):
         need_retransfer = []
 
         try:
-            from sqlalchemy import desc
-            from app.db.models.transferhistory import TransferHistory
-            from app.db import SessionFactory
-
             with SessionFactory() as db:
                 for check_dir in retransfer_dirs:
                     logger.info(f"TransferCleaner: 检测目录 {check_dir}")
 
-                    # 查询源路径在该目录下的记录
-                    records = db.query(TransferHistory).filter(
+                    # 流式查询源路径在该目录下的记录
+                    query = db.query(TransferHistory).filter(
                         TransferHistory.src.like(f"{check_dir}%")
-                    ).order_by(desc(TransferHistory.id)).limit(500).all()
+                    ).order_by(desc(TransferHistory.id)).limit(500)
 
-                    logger.info(f"TransferCleaner: 找到 {len(records)} 条匹配记录")
-
-                    for record in records:
+                    for record in query.yield_per(100):
+                        if self._stop_event.is_set():
+                            logger.info("TransferCleaner: 重新整理检测收到停止信号，退出")
+                            return
                         total_checked += 1
                         src_path = record.src
 
@@ -562,7 +614,7 @@ class TransferCleaner(_PluginBase):
                     if len(need_retransfer) >= 100:
                         break
 
-        except Exception as e:
+        except (SQLAlchemyError, OSError) as e:
             logger.exception("TransferCleaner: 重新整理检测任务异常")
             self.systemmessage.put(f"重新整理检测异常: {str(e)}", title="转移记录清理")
             return
@@ -570,27 +622,23 @@ class TransferCleaner(_PluginBase):
         # 处理需要重新整理的文件
         retransfer_count = 0
         if need_retransfer and not self._dry_run:
-            try:
-                from app.chain.transfer import TransferChain
-                transfer_chain = TransferChain()
+            transfer_chain = self._create_transfer_chain()
 
-                for item in need_retransfer:
-                    src_path = item["src"]
+            for item in need_retransfer:
+                if self._stop_event.is_set():
+                    break
+                src_path = item["src"]
+
+                # 先整理后删除（确保整理成功才删记录）
+                if self._trigger_retransfer(transfer_chain, src_path):
                     try:
-                        # 先删除旧的转移记录
                         self._transferhistory.delete(item["id"])
-                        logger.info(f"TransferCleaner: 已删除旧记录 ID={item['id']}")
-
-                        # 触发重新整理
-                        transfer_chain.process(Path(src_path))
                         retransfer_count += 1
-                        logger.info(f"TransferCleaner: 已触发重新整理 {src_path}")
-
-                    except Exception as e:
-                        logger.exception(f"TransferCleaner: 重新整理失败 {src_path}")
-
-            except ImportError:
-                logger.error("TransferCleaner: 无法导入 TransferChain，跳过重新整理")
+                        logger.info(f"TransferCleaner: 已触发重新整理并删除旧记录 ID={item['id']}")
+                    except SQLAlchemyError:
+                        logger.exception(f"TransferCleaner: 删除旧记录失败 ID={item['id']}")
+                else:
+                    logger.warning(f"TransferCleaner: 重新整理失败，保留记录 ID={item['id']}")
 
         # 发送通知
         dry_run_tag = "[模拟] " if self._dry_run else ""
@@ -668,7 +716,7 @@ class TransferCleaner(_PluginBase):
 
                 logger.info(f"TransferCleaner: {mon_path} 目录监控启动 [兼容模式], observer.is_alive={observer.is_alive()}")
 
-            except Exception as e:
+            except (OSError, RuntimeError) as e:
                 logger.exception(f"TransferCleaner: 启动目录监控失败 {mon_path}")
                 self.systemmessage.put(
                     f"启动目录监控失败：{mon_path}\n{str(e)}",
@@ -763,7 +811,7 @@ class TransferCleaner(_PluginBase):
                 # 立即处理
                 self._process_delete(event_type, src_path, dest_path)
 
-        except Exception as e:
+        except (OSError, TypeError, ValueError) as e:
             logger.exception(f"TransferCleaner: 处理事件异常 {src_path}")
 
     def _process_delete(self, event_type: str, src_path: str, dest_path: str = None):
@@ -816,21 +864,27 @@ class TransferCleaner(_PluginBase):
                 return True
         return False
 
+    def _cleanup_event_cache(self, current_time: float):
+        """按固定周期清理过期缓存，避免每次事件都全量遍历"""
+        if current_time - self._last_event_cache_cleanup < self._event_cache_cleanup_interval:
+            return
+        expired_keys = [
+            k for k, v in self._event_cache.items()
+            if current_time - v > self._dedupe_ttl
+        ]
+        for k in expired_keys:
+            self._event_cache.pop(k, None)
+        self._last_event_cache_cleanup = current_time
+
     def _is_duplicate_event(self, path: str) -> bool:
         """检查是否为重复事件"""
         current_time = time.time()
 
         with self._event_cache_lock:
-            # 清理过期缓存
-            expired_keys = [
-                k for k, v in self._event_cache.items()
-                if current_time - v > self._dedupe_ttl
-            ]
-            for k in expired_keys:
-                del self._event_cache[k]
+            self._cleanup_event_cache(current_time)
 
-            # 检查是否重复
-            if path in self._event_cache:
+            last_seen = self._event_cache.get(path)
+            if last_seen is not None and current_time - last_seen <= self._dedupe_ttl:
                 return True
 
             # 记录事件
@@ -881,7 +935,7 @@ class TransferCleaner(_PluginBase):
                     f"src={src_path} 可能存在异常数据"
                 )
 
-        except Exception as e:
+        except SQLAlchemyError:
             logger.exception(f"TransferCleaner: 删除历史记录异常 {src_path}")
 
         return result
@@ -957,7 +1011,7 @@ class TransferCleaner(_PluginBase):
 
         try:
             trigger = CronTrigger.from_crontab(cron_exp)
-        except Exception as e:
+        except ValueError as e:
             logger.error(f"TransferCleaner: 无效的定时任务表达式 `{cron_exp}`: {e}")
             return []
 
@@ -973,8 +1027,7 @@ class TransferCleaner(_PluginBase):
         """
         定时任务：执行检测未上传和清理假失败
         """
-        if self._retransfer_once:
-            self._run_retransfer_task()
+        self._run_retransfer_task()
         if self._clean_failed:
             self._run_clean_failed_task()
 
@@ -1263,6 +1316,48 @@ class TransferCleaner(_PluginBase):
                             }
                         ],
                     },
+                    # 不删除目录
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "exclude_dirs",
+                                            "label": "不删除目录（命中路径前缀将跳过，每行一个）",
+                                            "rows": 3,
+                                            "placeholder": "/media/待上传/保留目录",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    # 排除关键词
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "exclude_keywords",
+                                            "label": "排除关键词（路径中包含关键词则跳过，每行一个）",
+                                            "rows": 3,
+                                            "placeholder": "sample\n@Recycle",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
                     # 清理目录（立即运行使用）
                     {
                         "component": "VRow",
@@ -1336,7 +1431,81 @@ class TransferCleaner(_PluginBase):
 
     def get_api(self) -> List[Dict[str, Any]]:
         """API接口"""
-        pass
+        return [
+            {
+                "path": "/status",
+                "endpoint": self._api_status,
+                "methods": ["GET"],
+                "summary": "获取插件状态",
+            },
+            {
+                "path": "/run_cleanup",
+                "endpoint": self._api_run_cleanup,
+                "methods": ["POST"],
+                "summary": "手动触发清理任务",
+            },
+            {
+                "path": "/run_retransfer",
+                "endpoint": self._api_run_retransfer,
+                "methods": ["POST"],
+                "summary": "手动触发重新整理检测",
+            },
+        ]
+
+    def _api_status(self, *_args, **_kwargs) -> Dict[str, Any]:
+        """返回插件状态"""
+        if self._event_cache_lock:
+            with self._event_cache_lock:
+                event_cache_size = len(self._event_cache or {})
+        else:
+            event_cache_size = len(self._event_cache or {})
+
+        if self._notify_buffer_lock:
+            with self._notify_buffer_lock:
+                notify_buffer_size = len(self._notify_buffer or [])
+        else:
+            notify_buffer_size = len(self._notify_buffer or [])
+
+        return {
+            "success": True,
+            "data": {
+                "enabled": self._enabled,
+                "dry_run": self._dry_run,
+                "delay_enabled": self._delay_enabled,
+                "delay_seconds": self._delay_seconds,
+                "observers": len(self._observers or []),
+                "event_cache_size": event_cache_size,
+                "notify_buffer_size": notify_buffer_size,
+                "clean_failed": self._clean_failed,
+                "retransfer_cron": self._retransfer_cron,
+            }
+        }
+
+    def _api_run_cleanup(self, *_args, **_kwargs) -> Dict[str, Any]:
+        """手动触发清理任务"""
+        try:
+            threading.Thread(
+                target=self._run_cleanup_task,
+                daemon=True,
+                name="TransferCleaner-ApiCleanup"
+            ).start()
+        except RuntimeError as e:
+            logger.exception("TransferCleaner: 启动清理任务失败")
+            return {"success": False, "message": f"启动清理任务失败: {str(e)}"}
+        return {"success": True, "message": "清理任务已启动"}
+
+    def _api_run_retransfer(self, *_args, **_kwargs) -> Dict[str, Any]:
+        """手动触发重新整理检测"""
+        try:
+            threading.Thread(
+                target=self._run_retransfer_task,
+                daemon=True,
+                name="TransferCleaner-ApiRetransfer"
+            ).start()
+        except RuntimeError as e:
+            logger.exception("TransferCleaner: 启动重新整理任务失败")
+            return {"success": False, "message": f"启动重新整理任务失败: {str(e)}"}
+        return {"success": True, "message": "重新整理检测任务已启动"}
 
     def stop_service(self):
         """停止服务"""
@@ -1347,13 +1516,30 @@ class TransferCleaner(_PluginBase):
             self._delay_thread.join(timeout=5)
             logger.info("TransferCleaner: 延迟删除线程已停止")
 
+        # 停止通知聚合定时器
+        if self._notify_timer:
+            try:
+                self._notify_timer.cancel()
+                if self._notify_timer.is_alive():
+                    self._notify_timer.join(timeout=2)
+            except RuntimeError:
+                logger.warning("TransferCleaner: 通知聚合定时器停止时状态异常")
+            self._notify_timer = None
+            logger.info("TransferCleaner: 通知聚合定时器已停止")
+
+        # 清空通知缓冲区
+        if self._notify_buffer_lock:
+            with self._notify_buffer_lock:
+                if self._notify_buffer is not None:
+                    self._notify_buffer.clear()
+
         # 停止目录监控
         if self._observers:
             for observer in self._observers:
                 try:
                     observer.stop()
                     observer.join(timeout=5)
-                except Exception as e:
+                except (RuntimeError, OSError):
                     logger.exception("TransferCleaner: 停止监控异常")
             self._observers = []
             logger.info("TransferCleaner: 目录监控已停止")
