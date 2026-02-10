@@ -530,7 +530,7 @@ class TransferCleaner(_PluginBase):
                     # 查询源路径在该目录下的记录
                     records = db.query(TransferHistory).filter(
                         TransferHistory.src.like(f"{check_dir}%")
-                    ).order_by(desc(TransferHistory.id)).limit(500).all()
+                    ).order_by(desc(TransferHistory.id)).limit(2000).all()
 
                     logger.info(f"TransferCleaner: 找到 {len(records)} 条匹配记录")
 
@@ -552,11 +552,11 @@ class TransferCleaner(_PluginBase):
                                 f"ID={record.id}, src={src_path}"
                             )
 
-                        if len(need_retransfer) >= 100:
-                            logger.warning("TransferCleaner: 达到单次检测上限 100 条")
+                        if len(need_retransfer) >= 500:
+                            logger.warning("TransferCleaner: 达到单次检测上限 500 条")
                             break
 
-                    if len(need_retransfer) >= 100:
+                    if len(need_retransfer) >= 500:
                         break
 
         except Exception as e:
