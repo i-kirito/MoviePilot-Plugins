@@ -287,15 +287,12 @@ class TransferCleaner(_PluginBase):
         """
         logger.info("TransferCleaner: 开始运行清理任务...")
 
-        # 解析清理目录
-        clean_dirs = [d.strip() for d in self._clean_dirs.split("\n") if d.strip()]
-        if not clean_dirs:
-            # 如果没有配置清理目录，使用监控目录
-            clean_dirs = [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]
+        # 直接使用监控目录
+        clean_dirs = [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]
 
         if not clean_dirs:
-            logger.warning("TransferCleaner: 未配置清理目录，跳过清理任务")
-            self.systemmessage.put("未配置清理目录，请先配置监控目录或清理目录", title="转移记录清理")
+            logger.warning("TransferCleaner: 未配置监控目录，跳过清理任务")
+            self.systemmessage.put("未配置监控目录，请先配置监控目录", title="转移记录清理")
             return
 
         # 将本地目录转换为存储路径前缀（用于数据库查询）
@@ -511,11 +508,11 @@ class TransferCleaner(_PluginBase):
         """
         logger.info("TransferCleaner: 开始运行重新整理检测任务...")
 
-        # 解析检测目录
-        retransfer_dirs = [d.strip() for d in self._retransfer_dirs.split("\n") if d.strip()]
+        # 直接使用监控目录
+        retransfer_dirs = [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]
         if not retransfer_dirs:
-            # 默认使用 /media/待上传
-            retransfer_dirs = ["/media/待上传"]
+            logger.warning("TransferCleaner: 未配置监控目录，跳过重新整理检测")
+            return
 
         # 统计
         total_checked = 0
@@ -1084,40 +1081,6 @@ class TransferCleaner(_PluginBase):
                             },
                         ],
                     },
-                    # 重新整理检测
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "retransfer_once",
-                                            "label": "检测未上传文件",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 8},
-                                "content": [
-                                    {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "warning",
-                                            "variant": "tonal",
-                                            "density": "compact",
-                                            "text": "检测源文件仍存在但有转移记录的情况，删除记录并重新整理。",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
                     # 清理假失败记录
                     {
                         "component": "VRow",
@@ -1261,48 +1224,6 @@ class TransferCleaner(_PluginBase):
                                     }
                                 ],
                             }
-                        ],
-                    },
-                    # 清理目录（立即运行使用）
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "clean_dirs",
-                                            "label": "定时清理目录（网盘挂载目录放这里，通过定时任务清理）",
-                                            "rows": 3,
-                                            "placeholder": "/media/115/转存",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    # 重新整理目录
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "retransfer_dirs",
-                                            "label": "重新整理检测目录（留空默认 /media/待上传）",
-                                            "rows": 2,
-                                            "placeholder": "/media/待上传",
-                                        },
-                                    }
-                                ],
-                            },
                         ],
                     },
                 ],
