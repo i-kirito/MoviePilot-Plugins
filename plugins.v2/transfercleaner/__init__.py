@@ -713,7 +713,10 @@ class TransferCleaner(_PluginBase):
                 continue
 
             # 执行删除历史记录
-            self._process_delete(event_type, src_path, dest_path)
+            deleted = self._process_delete(event_type, src_path, dest_path)
+            # 如果未删除任何记录，从去重缓存移除，允许后续事件重试
+            if not deleted:
+                self._remove_from_event_cache(src_path)
 
     def handle_file_event(self, event_type: str, src_path: str, dest_path: str = None):
         """
@@ -758,30 +761,47 @@ class TransferCleaner(_PluginBase):
                 logger.debug(f"TransferCleaner: 事件加入延迟队列，{self._delay_seconds}秒后处理")
             else:
                 # 立即处理
-                self._process_delete(event_type, src_path, dest_path)
+                deleted = self._process_delete(event_type, src_path, dest_path)
+                # 如果未删除任何记录，从去重缓存移除，允许后续事件重试
+                if not deleted:
+                    self._remove_from_event_cache(src_path)
 
         except Exception as e:
             logger.exception(f"TransferCleaner: 处理事件异常 {src_path}")
 
-    def _process_delete(self, event_type: str, src_path: str, dest_path: str = None):
-        """实际执行删除历史记录"""
+    def _process_delete(self, event_type: str, src_path: str, dest_path: str = None) -> bool:
+        """
+        实际执行删除历史记录
+
+        :return: 是否成功删除了记录
+        """
         # 规范化路径
         normalized_path = self._normalize_path(src_path)
 
         # 应用路径映射转换
         storage_path = self._convert_path_to_storage(normalized_path)
 
-        # 删除历史记录（先尝试存储路径，再尝试原路径）
+        # 先尝试精确匹配（快速路径）
         result = self._delete_history_by_src(storage_path, event_type)
 
-        # 如果存储路径没有匹配到，且存储路径与原路径不同，再尝试原路径
+        # 精确匹配失败，尝试原路径
         if result["deleted_count"] == 0 and storage_path != normalized_path:
             logger.debug(f"TransferCleaner: 存储路径未匹配，尝试原路径 {normalized_path}")
             result = self._delete_history_by_src(normalized_path, event_type)
 
+        # 精确匹配全部失败，使用 LIKE 模糊匹配（处理路径格式差异）
+        if result["deleted_count"] == 0:
+            logger.info(f"TransferCleaner: 精确匹配未找到记录，尝试模糊匹配 {storage_path}")
+            result = self._delete_history_by_like(storage_path, normalized_path, event_type)
+
+        if result["deleted_count"] == 0:
+            logger.warning(f"TransferCleaner: 未找到匹配的转移记录 {src_path}")
+
         # 发送通知
         if result["deleted_count"] > 0 and self._notify:
             self._send_notification(event_type, storage_path, dest_path, result)
+
+        return result["deleted_count"] > 0
 
     def _normalize_path(self, path: str) -> str:
         """路径规范化"""
@@ -834,6 +854,11 @@ class TransferCleaner(_PluginBase):
             self._event_cache[path] = current_time
             return False
 
+    def _remove_from_event_cache(self, path: str):
+        """从去重缓存中移除路径，允许后续事件重试"""
+        with self._event_cache_lock:
+            self._event_cache.pop(path, None)
+
     def _delete_history_by_src(self, src_path: str, reason: str) -> dict:
         """
         根据源路径删除转移历史记录
@@ -880,6 +905,66 @@ class TransferCleaner(_PluginBase):
 
         except Exception as e:
             logger.exception(f"TransferCleaner: 删除历史记录异常 {src_path}")
+
+        return result
+
+    def _delete_history_by_like(self, storage_path: str, local_path: str, reason: str) -> dict:
+        """
+        使用 LIKE 模糊匹配删除转移历史记录（处理路径格式差异）
+
+        :param storage_path: 转换后的存储路径
+        :param local_path: 原始本地路径
+        :param reason: 删除原因
+        :return: {"deleted_count": int, "deleted_ids": list, "dry_run": bool}
+        """
+        result = {
+            "deleted_count": 0,
+            "deleted_ids": [],
+            "dry_run": self._dry_run
+        }
+
+        try:
+            from app.db.models.transferhistory import TransferHistory
+            from app.db import SessionFactory
+
+            # 提取文件名用于模糊匹配
+            filename = Path(storage_path).name
+            if not filename:
+                return result
+
+            with SessionFactory() as db:
+                # 用文件名做 LIKE 匹配
+                records = db.query(TransferHistory).filter(
+                    TransferHistory.src.like(f"%{filename}")
+                ).all()
+
+                if not records:
+                    return result
+
+                logger.info(f"TransferCleaner: 模糊匹配找到 {len(records)} 条记录 (文件名={filename})")
+
+                for record in records:
+                    result["deleted_ids"].append(record.id)
+                    result["deleted_count"] += 1
+
+                    if self._dry_run:
+                        logger.info(
+                            f"[DryRun] TransferCleaner: 将删除历史记录 "
+                            f"ID={record.id}, src={record.src}"
+                        )
+                    else:
+                        self._transferhistory.delete(record.id)
+                        logger.info(
+                            f"TransferCleaner: 已删除历史记录 "
+                            f"ID={record.id}, src={record.src}, reason={reason}"
+                        )
+
+                    if result["deleted_count"] >= 100:
+                        logger.warning("TransferCleaner: 达到模糊匹配删除上限 100 条")
+                        break
+
+        except Exception as e:
+            logger.exception(f"TransferCleaner: 模糊匹配删除异常 {storage_path}")
 
         return result
 
