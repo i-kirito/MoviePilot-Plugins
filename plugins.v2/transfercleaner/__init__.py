@@ -104,7 +104,7 @@ class TransferCleaner(_PluginBase):
     _notify_buffer: List[str] = None
     _notify_buffer_lock: threading.Lock = None
     _notify_timer: threading.Timer = None
-    _notify_delay: int = 10  # 通知延迟秒数
+    _notify_delay: int = 30  # 通知延迟秒数（覆盖多个轮询周期）
 
     def init_plugin(self, config: dict = None):
         """初始化插件"""
@@ -1009,18 +1009,86 @@ class TransferCleaner(_PluginBase):
 
         title = f"【转移记录清理】{dry_run_tag}已删除 {count} 条记录"
 
-        # 按剧集名分组
-        if count <= 5:
-            text = "\n".join(files)
+        # 按剧集/系列名分组
+        groups = self._group_files_by_series(files)
+
+        text_parts = []
+        for series_name, episode_files in groups.items():
+            if len(episode_files) == 1:
+                text_parts.append(f"· {episode_files[0]}")
+            else:
+                # 提取集数信息，紧凑显示
+                episodes = self._extract_episode_numbers(episode_files)
+                if episodes:
+                    text_parts.append(f"· {series_name} ({len(episode_files)}集: {episodes})")
+                else:
+                    text_parts.append(f"· {series_name} ({len(episode_files)}个文件)")
+
+        # 限制通知长度
+        if len(text_parts) > 10:
+            text = "\n".join(text_parts[:10]) + f"\n... 等共 {len(text_parts)} 个系列"
         else:
-            # 超过5个文件，只显示前5个 + 省略提示
-            text = "\n".join(files[:5]) + f"\n... 等共 {count} 个文件"
+            text = "\n".join(text_parts)
 
         self.post_message(
             mtype=NotificationType.SiteMessage,
             title=title,
             text=text
         )
+
+    @staticmethod
+    def _group_files_by_series(files: List[str]) -> Dict[str, List[str]]:
+        """按剧集/系列名分组文件"""
+        import re
+        groups: Dict[str, List[str]] = {}
+
+        for f in files:
+            # 尝试提取系列名（匹配到 S01E01 / EP01 / E01 之前的部分）
+            match = re.match(r'^(.*?)[.\s]S\d+E\d+', f, re.IGNORECASE)
+            if not match:
+                match = re.match(r'^(.*?)[.\s](?:EP?\d+)', f, re.IGNORECASE)
+
+            if match:
+                series = match.group(1).strip().rstrip('.')
+            else:
+                series = f  # 无法提取系列名，用完整文件名
+
+            if series not in groups:
+                groups[series] = []
+            groups[series].append(f)
+
+        return groups
+
+    @staticmethod
+    def _extract_episode_numbers(files: List[str]) -> str:
+        """从文件名列表提取集数信息，返回紧凑的集数字符串"""
+        import re
+        episodes = []
+        for f in files:
+            # 匹配 S01E03, E03, EP03 等
+            match = re.search(r'[.\s]S\d+E(\d+)', f, re.IGNORECASE)
+            if not match:
+                match = re.search(r'[.\s]EP?(\d+)', f, re.IGNORECASE)
+            if match:
+                episodes.append(int(match.group(1)))
+
+        if not episodes:
+            return ""
+
+        episodes.sort()
+        # 生成紧凑范围表示: [1,2,3,5,7,8] -> "E01-E03, E05, E07-E08"
+        ranges = []
+        start = episodes[0]
+        end = episodes[0]
+        for ep in episodes[1:]:
+            if ep == end + 1:
+                end = ep
+            else:
+                ranges.append(f"E{start:02d}-E{end:02d}" if start != end else f"E{start:02d}")
+                start = end = ep
+        ranges.append(f"E{start:02d}-E{end:02d}" if start != end else f"E{start:02d}")
+
+        return ", ".join(ranges)
 
     def get_state(self) -> bool:
         """获取插件状态"""
