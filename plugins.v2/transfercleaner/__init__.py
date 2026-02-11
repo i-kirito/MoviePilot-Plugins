@@ -801,7 +801,8 @@ class TransferCleaner(_PluginBase):
         if result["deleted_count"] > 0 and self._notify:
             self._send_notification(event_type, storage_path, dest_path, result)
 
-        return result["deleted_count"] > 0
+        # 异常导致的失败也视为未成功，允许重试
+        return result["deleted_count"] > 0 and not result.get("error")
 
     def _normalize_path(self, path: str) -> str:
         """路径规范化"""
@@ -910,10 +911,11 @@ class TransferCleaner(_PluginBase):
 
     def _delete_history_by_like(self, storage_path: str, local_path: str, reason: str) -> dict:
         """
-        使用 LIKE 模糊匹配删除转移历史记录（处理路径格式差异）
+        使用 LIKE 受限模糊匹配删除转移历史记录（处理路径格式差异）
+        匹配策略：目录前缀 + 文件名，避免跨目录误删
 
         :param storage_path: 转换后的存储路径
-        :param local_path: 原始本地路径
+        :param local_path: 原始本地路径（用于构建目录约束）
         :param reason: 删除原因
         :return: {"deleted_count": int, "deleted_ids": list, "dry_run": bool}
         """
@@ -927,21 +929,52 @@ class TransferCleaner(_PluginBase):
             from app.db.models.transferhistory import TransferHistory
             from app.db import SessionFactory
 
-            # 提取文件名用于模糊匹配
+            # 提取文件名用于匹配
             filename = Path(storage_path).name
             if not filename:
                 return result
 
+            # 转义 LIKE 通配符（防止文件名中的 % _ 被当作模式字符）
+            escaped_filename = filename.replace("%", "\\%").replace("_", "\\_")
+
+            # 构建目录前缀候选列表（约束匹配范围，防止跨目录误删）
+            dir_prefixes = set()
+            for candidate in [storage_path, local_path]:
+                parent = str(Path(candidate).parent)
+                if parent and parent != ".":
+                    # 取上两级目录作为前缀（兼容子目录结构差异）
+                    grandparent = str(Path(parent).parent)
+                    if grandparent and grandparent != ".":
+                        escaped_gp = grandparent.replace("%", "\\%").replace("_", "\\_")
+                        dir_prefixes.add(escaped_gp)
+                    escaped_parent = parent.replace("%", "\\%").replace("_", "\\_")
+                    dir_prefixes.add(escaped_parent)
+
             with SessionFactory() as db:
-                # 用文件名做 LIKE 匹配
-                records = db.query(TransferHistory).filter(
-                    TransferHistory.src.like(f"%{filename}")
-                ).all()
+                from sqlalchemy import or_
+
+                if dir_prefixes:
+                    # 受限匹配：目录前缀 + 文件名
+                    conditions = [
+                        TransferHistory.src.like(f"{prefix}%{escaped_filename}", escape="\\")
+                        for prefix in dir_prefixes
+                    ]
+                    records = db.query(TransferHistory).filter(
+                        or_(*conditions)
+                    ).limit(10).all()
+                else:
+                    # 无目录信息时的保守匹配：完整路径尾部匹配 + 严格 limit
+                    records = db.query(TransferHistory).filter(
+                        TransferHistory.src.like(f"%/{escaped_filename}", escape="\\")
+                    ).limit(5).all()
 
                 if not records:
                     return result
 
-                logger.info(f"TransferCleaner: 模糊匹配找到 {len(records)} 条记录 (文件名={filename})")
+                logger.info(
+                    f"TransferCleaner: 模糊匹配找到 {len(records)} 条记录 "
+                    f"(文件名={filename}, 目录约束={len(dir_prefixes)}个)"
+                )
 
                 for record in records:
                     result["deleted_ids"].append(record.id)
@@ -959,12 +992,10 @@ class TransferCleaner(_PluginBase):
                             f"ID={record.id}, src={record.src}, reason={reason}"
                         )
 
-                    if result["deleted_count"] >= 100:
-                        logger.warning("TransferCleaner: 达到模糊匹配删除上限 100 条")
-                        break
-
         except Exception as e:
             logger.exception(f"TransferCleaner: 模糊匹配删除异常 {storage_path}")
+            # 标记为失败，让调用方知道不是"未找到"而是"执行出错"
+            result["error"] = True
 
         return result
 
@@ -1063,24 +1094,24 @@ class TransferCleaner(_PluginBase):
     def _extract_episode_numbers(files: List[str]) -> str:
         """从文件名列表提取集数信息，返回紧凑的集数字符串"""
         import re
-        episodes = []
+        episodes = set()
         for f in files:
             # 匹配 S01E03, E03, EP03 等
             match = re.search(r'[.\s]S\d+E(\d+)', f, re.IGNORECASE)
             if not match:
                 match = re.search(r'[.\s]EP?(\d+)', f, re.IGNORECASE)
             if match:
-                episodes.append(int(match.group(1)))
+                episodes.add(int(match.group(1)))
 
         if not episodes:
             return ""
 
-        episodes.sort()
+        sorted_eps = sorted(episodes)
         # 生成紧凑范围表示: [1,2,3,5,7,8] -> "E01-E03, E05, E07-E08"
         ranges = []
-        start = episodes[0]
-        end = episodes[0]
-        for ep in episodes[1:]:
+        start = sorted_eps[0]
+        end = sorted_eps[0]
+        for ep in sorted_eps[1:]:
             if ep == end + 1:
                 end = ep
             else:
@@ -1441,6 +1472,17 @@ class TransferCleaner(_PluginBase):
         if self._delay_thread and self._delay_thread.is_alive():
             self._delay_thread.join(timeout=5)
             logger.info("TransferCleaner: 延迟删除线程已停止")
+
+        # 刷新并停止通知定时器（防止停服后丢通知）
+        if self._notify_timer:
+            self._notify_timer.cancel()
+            self._notify_timer = None
+        # 发送缓冲区中残留的通知
+        if self._notify_buffer and len(self._notify_buffer) > 0:
+            try:
+                self._flush_notify_buffer(self._dry_run)
+            except Exception:
+                pass
 
         # 停止目录监控
         if self._observers:
