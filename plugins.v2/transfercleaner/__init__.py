@@ -1154,10 +1154,17 @@ class TransferCleaner(_PluginBase):
         """
         定时任务：执行检测未上传和清理假失败
         """
-        if self._retransfer_once:
+        logger.info(
+            f"TransferCleaner: 定时任务开始，执行清理与重新整理 "
+            f"(clean_failed={self._clean_failed})"
+        )
+        try:
+            self._run_cleanup_task()
             self._run_retransfer_task()
-        if self._clean_failed:
-            self._run_clean_failed_task()
+            if self._clean_failed:
+                self._run_clean_failed_task()
+        finally:
+            logger.info("TransferCleaner: 定时任务结束")
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """配置页面"""
